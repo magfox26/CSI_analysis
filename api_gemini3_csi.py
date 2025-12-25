@@ -172,7 +172,34 @@ Rules:
 Now analyze the image and strictly follow the rules above."""
 
 
-def process_dataset(image_folder, dataset_name, retries=3, retry_wait=2):
+def load_ocrmt30k_filter_list():
+    filter_list = set()
+    
+    script_dir = Path(__file__).parent
+    
+    test_file = script_dir / "ocrmt30k_test_anno.json"
+    val_file = script_dir / "ocrmt30k_val_anno.json"
+    
+    if test_file.exists():
+        with open(test_file, 'r', encoding='utf-8') as f:
+            test_data = json.load(f)
+            filter_list.update(test_data.keys())
+        print(f"加载 ocrmt30k_test_anno.json: {len(test_data)} 张图片")
+    else:
+        print(f"警告: 未找到 {test_file}")
+    
+    if val_file.exists():
+        with open(val_file, 'r', encoding='utf-8') as f:
+            val_data = json.load(f)
+            filter_list.update(val_data.keys())
+        print(f"加载 ocrmt30k_val_anno.json: {len(val_data)} 张图片")
+    else:
+        print(f"警告: 未找到 {val_file}")
+    
+    return filter_list
+
+
+def process_dataset(image_folder, dataset_name, filter_list=None, retries=3, retry_wait=2):
     results = {}
     error_log = {}
     
@@ -181,8 +208,13 @@ def process_dataset(image_folder, dataset_name, retries=3, retry_wait=2):
                   list(image_folder_path.glob("*.png")) + \
                   list(image_folder_path.glob("*.jpeg"))
     
-    print(f"Processing dataset: {dataset_name}")
-    print(f"Found {len(image_files)} images in {image_folder}")
+    if filter_list is not None:
+        image_files = [img for img in image_files if img.name in filter_list]
+        print(f"Processing dataset: {dataset_name} (已筛选)")
+        print(f"筛选后剩余 {len(image_files)} 张图片")
+    else:
+        print(f"Processing dataset: {dataset_name}")
+        print(f"Found {len(image_files)} images in {image_folder}")
     
     for image_path in tqdm.tqdm(image_files):
         image_name = image_path.name 
@@ -191,28 +223,7 @@ def process_dataset(image_folder, dataset_name, retries=3, retry_wait=2):
         for attempt in range(1, retries + 1):
             try:
                 output = call_api(CSI_PROMPT, str(image_path))
-                
-                try:
-                    clean_output = output.strip()
-                    if clean_output.startswith("```json"):
-                        clean_output = clean_output[7:]
-                    if clean_output.startswith("```"):
-                        clean_output = clean_output[3:]
-                    if clean_output.endswith("```"):
-                        clean_output = clean_output[:-3]
-                    clean_output = clean_output.strip()
-                    
-                    parsed_output = json.loads(clean_output)
-                    results[image_name] = parsed_output
-                except json.JSONDecodeError as je:
-                    print(f"[{image_name}] JSON解析失败: {je}")
-                    results[image_name] = {
-                        "status": "Error",
-                        "raw_output": output,
-                        "error": f"JSON decode error: {str(je)}"
-                    }
-                
-                break 
+                break
                 
             except Exception as e:
                 last_error = str(e)
@@ -221,11 +232,10 @@ def process_dataset(image_folder, dataset_name, retries=3, retry_wait=2):
                     time.sleep(retry_wait)
                 else:
                     print(f"[{image_name}] 已重试 {retries} 次仍失败")
-                    results[image_name] = {
-                        "status": "Error",
-                        "error": last_error
-                    }
+                    output = ""
                     error_log[image_name] = last_error
+        
+        results[image_name] = output
     
     return results, error_log
 
@@ -240,28 +250,34 @@ if __name__ == '__main__':
     Path(root).mkdir(parents=True, exist_ok=True)
     print(f"结果保存地址: {root}")
     
+    ocrmt30k_filter = load_ocrmt30k_filter_list()
+    print(f"OCRMT30K 筛选列表总计: {len(ocrmt30k_filter)} 张图片\n")
+    
     datasets = [
         {
             "name": "AibTrans",
-            "path": "/mnt/workspace/xintong/dataset/practice_ds_500/"
+            "path": "/mnt/workspace/xintong/dataset/practice_ds_500/",
+            "filter": None
         },
         {
             "name": "OCRMT30K",
-            "path": "/mnt/workspace/xintong/dataset/OCRMT30K-refine/whole_image_v2/"
+            "path": "/mnt/workspace/xintong/dataset/OCRMT30K-refine/whole_image_v2/",
+            "filter": ocrmt30k_filter
         }
     ]
     
     for dataset in datasets:
         dataset_name = dataset["name"]
         image_folder = dataset["path"]
+        filter_list = dataset["filter"]
         
         print(f"\n{'='*60}")
         print(f"开始处理数据集: {dataset_name}")
         print(f"{'='*60}\n")
         
-        results, error_log = process_dataset(image_folder, dataset_name)
+        results, error_log = process_dataset(image_folder, dataset_name, filter_list)
         
-        output_path = os.path.join(root, f"{model_name}_csi_analysis_{dataset_name}.json")
+        output_path = os.path.join(root, f"{model_name}_csi_analysis_{dataset_name}_raw.json")
         print(f"\n保存结果到: {output_path}")
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(results, f, ensure_ascii=False, indent=4)
@@ -273,8 +289,9 @@ if __name__ == '__main__':
                 json.dump(error_log, f, ensure_ascii=False, indent=4)
         
         print(f"\n数据集 {dataset_name} 处理完成!")
-        print(f"成功处理: {len(results)} 张图片")
-        print(f"失败: {len(error_log)} 张图片")
+        print(f"总共处理: {len(results)} 张图片")
+        print(f"API调用失败: {len(error_log)} 张图片")
+        print(f"API调用成功: {len([v for v in results.values() if v != ''])} 张图片")
     
     print(f"\n{'='*60}")
     print("所有数据集处理完成!")
